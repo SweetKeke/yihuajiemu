@@ -7,12 +7,13 @@ import {
     eventSource,
     event_types,
 } from '../../../../script.js';
-import { Popup, POPUP_TYPE } from '../../../popup.js';
+import { Popup, POPUP_TYPE, POPUP_RESULT } from '../../../popup.js';
 
 const EXT_NAME = 'yihuajiemu';
 
 let idSeq = 0;
 const genId = () => 'g' + Date.now().toString(36) + (idSeq++).toString(36);
+let normalized = false;
 
 function normalizeRules(rules) {
     if (!Array.isArray(rules)) return [];
@@ -47,19 +48,22 @@ function legacyRulesToArray(raw) {
 function getSettings() {
     if (!extension_settings[EXT_NAME]) extension_settings[EXT_NAME] = {};
     const s = extension_settings[EXT_NAME];
-    if (!Array.isArray(s.groups)) {
-        const legacy = legacyRulesToArray(s.rules);
-        s.groups = [{ id: genId(), name: '默认', enabled: true, rules: legacy }];
-        delete s.rules;
-    }
-    s.groups = s.groups.map((g) => ({
-        id: g.id ?? genId(),
-        name: String(g.name ?? '未命名'),
-        enabled: g.enabled !== false,
-        rules: normalizeRules(g.rules),
-    }));
-    if (!s.activeGroupId || !s.groups.some((g) => g.id === s.activeGroupId)) {
-        s.activeGroupId = s.groups[0]?.id ?? null;
+    if (!normalized) {
+        if (!Array.isArray(s.groups)) {
+            const legacy = legacyRulesToArray(s.rules);
+            s.groups = [{ id: genId(), name: '默认', enabled: true, rules: legacy }];
+            delete s.rules;
+        }
+        s.groups = s.groups.map((g) => ({
+            id: g.id ?? genId(),
+            name: String(g.name ?? '未命名'),
+            enabled: g.enabled !== false,
+            rules: normalizeRules(g.rules),
+        }));
+        if (!s.activeGroupId || !s.groups.some((g) => g.id === s.activeGroupId)) {
+            s.activeGroupId = s.groups[0]?.id ?? null;
+        }
+        normalized = true;
     }
     return s;
 }
@@ -124,6 +128,35 @@ function countMatches(chatArr, rules) {
     return { messages, hits };
 }
 
+function exportRules() {
+    try {
+        const settings = getSettings();
+        const data = {
+            app: 'yihuajiemu',
+            version: 1,
+            exportedAt: new Date().toISOString(),
+            groups: settings.groups.map((g) => ({
+                name: g.name,
+                enabled: g.enabled,
+                rules: g.rules.map((r) => ({ find: r.find, replace: r.replace, enabled: r.enabled })),
+            })),
+        };
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = '移花接木-' + new Date().toISOString().slice(0, 10) + '.json';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        toastr.success('已导出规则文件');
+    } catch (error) {
+        console.error('[移花接木] 导出失败', error);
+        toastr.error('导出失败，请看控制台');
+    }
+}
+
 let busy = false;
 
 async function handleSingleMessage(messageId) {
@@ -180,33 +213,18 @@ async function scanCurrentChat() {
     return changed;
 }
 
-function renderRuleRow(rule, onChange, onDelete) {
-    const row = $('<div class="yhjm-rule"></div>');
-    const find = $('<input class="text_pole yhjm-find" type="text" placeholder="查找">').val(rule.find);
-    const arrow = $('<span class="yhjm-arrow">→</span>');
-    const replace = $('<input class="text_pole yhjm-replace" type="text" placeholder="替换（留空 = 删除）">').val(rule.replace);
-    const enabled = $('<input type="checkbox" class="yhjm-enabled">').prop('checked', rule.enabled);
-    const label = $('<label class="yhjm-enable-label"></label>').append(enabled).append(' 启用');
-    const del = $('<button class="menu_button yhjm-icon-btn" title="删除这条规则"></button>').append('<i class="fa-solid fa-trash"></i>');
-
-    find.on('input', () => { rule.find = String(find.val()).trim(); onChange(); });
-    replace.on('input', () => { rule.replace = String(replace.val()); onChange(); });
-    enabled.on('change', () => { rule.enabled = enabled.prop('checked'); onChange(); });
-    del.on('click', onDelete);
-
-    row.append(find, arrow, replace, label, del);
-    return row;
-}
-
 function openPanel() {
     const settings = getSettings();
     const container = $('<div class="yhjm-panel"></div>');
     const layout = $('<div class="yhjm-layout"></div>');
     const left = $('<div class="yhjm-left"></div>');
     const right = $('<div class="yhjm-right"></div>');
+
+    const searchRow = $('<div class="yhjm-search-row"></div>');
     const search = $('<input class="text_pole yhjm-search" type="text" placeholder="搜索组…">');
+    const addGroup = $('<button class="menu_button yhjm-icon-btn" title="新建组"></button>').append('<i class="fa-solid fa-plus"></i>');
+    searchRow.append(search, addGroup);
     const list = $('<div class="yhjm-group-list"></div>');
-    const addGroup = $('<button class="menu_button yhjm-add-group"></button>').append('<i class="fa-solid fa-plus"></i> ').append('新建组');
     const groupName = $('<input class="text_pole yhjm-group-name" type="text" placeholder="组名">');
     const rulesBox = $('<div class="yhjm-rules"></div>');
     const actions = $('<div class="yhjm-actions"></div>');
@@ -216,6 +234,23 @@ function openPanel() {
     let filter = '';
 
     const selectedGroup = () => settings.groups.find((g) => g.id === selectedId) ?? settings.groups[0] ?? null;
+
+    function renderRuleRow(rule, onChange, onDelete) {
+        const row = $('<div class="yhjm-rule"></div>');
+        const find = $('<input class="text_pole yhjm-find" type="text" placeholder="查找">').val(rule.find);
+        const arrow = $('<span class="yhjm-arrow">→</span>');
+        const replace = $('<input class="text_pole yhjm-replace" type="text" placeholder="替换（留空 = 删除）">').val(rule.replace);
+        const enabled = $('<input type="checkbox" class="yhjm-enabled" title="启用">').prop('checked', rule.enabled);
+        const del = $('<button class="menu_button yhjm-icon-btn" title="删除这条规则"></button>').append('<i class="fa-solid fa-trash"></i>');
+
+        find.on('input', () => { rule.find = String(find.val()).trim(); onChange(); });
+        replace.on('input', () => { rule.replace = String(replace.val()); onChange(); });
+        enabled.on('change', () => { rule.enabled = enabled.prop('checked'); onChange(); });
+        del.on('click', onDelete);
+
+        row.append(find, arrow, replace, enabled, del);
+        return row;
+    }
 
     function renderList() {
         list.empty();
@@ -230,10 +265,6 @@ function openPanel() {
             const row = $('<div class="yhjm-group-item"></div>');
             if (group.id === selectedId) row.addClass('active');
 
-            const enable = $('<input type="checkbox" class="yhjm-group-enable">').prop('checked', group.enabled);
-            enable.on('click', (event) => event.stopPropagation());
-            enable.on('change', () => { group.enabled = enable.prop('checked'); saveSettings(); });
-
             const name = $('<span class="yhjm-group-item-name"></span>').text(group.name || '未命名');
             name.on('click', () => {
                 selectedId = group.id;
@@ -241,8 +272,24 @@ function openPanel() {
                 saveSettings();
                 renderAll();
             });
+            name.on('dblclick', (event) => {
+                event.stopPropagation();
+                const input = $('<input class="text_pole yhjm-rename" type="text">').val(group.name);
+                name.replaceWith(input);
+                input.trigger('focus').select?.();
+                const commit = () => {
+                    group.name = String(input.val()).trim() || '未命名';
+                    saveSettings();
+                    renderAll();
+                };
+                input.on('blur', commit);
+                input.on('keydown', (ev) => {
+                    if (ev.key === 'Enter') input.trigger('blur');
+                    if (ev.key === 'Escape') renderAll();
+                });
+            });
 
-            const del = $('<button class="yhjm-group-del menu_button yhjm-icon-btn" title="删除这个组"></button>').append('<i class="fa-solid fa-trash"></i>');
+            const del = $('<button class="yhjm-group-del yhjm-icon-btn" title="删除这个组"></button>').append('<i class="fa-solid fa-trash"></i>');
             del.on('click', (event) => {
                 event.stopPropagation();
                 if (settings.groups.length <= 1) {
@@ -258,7 +305,13 @@ function openPanel() {
                 renderAll();
             });
 
-            row.append(name, del, enable);
+            const enable = $('<input type="checkbox" class="yhjm-group-enable" title="启用这个组">').prop('checked', group.enabled);
+            enable.on('change', () => {
+                group.enabled = enable.prop('checked');
+                saveSettings();
+            });
+
+            row.append(name, enable, del);
             list.append(row);
         }
     }
@@ -266,7 +319,6 @@ function openPanel() {
     function renderRight() {
         const group = selectedGroup();
         if (!group) return;
-        groupName.val(group.name);
         rulesBox.empty();
         for (const rule of group.rules) {
             rulesBox.append(renderRuleRow(
@@ -294,14 +346,32 @@ function openPanel() {
         renderList();
     });
 
-    addGroup.on('click', () => {
-        const group = { id: genId(), name: '组' + (settings.groups.length + 1), enabled: true, rules: [] };
-        settings.groups.push(group);
-        selectedId = group.id;
-        settings.activeGroupId = group.id;
-        saveSettings();
-        renderAll();
-    });
+    function openNewGroupDialog() {
+        const box = $('<div class="yhjm-rule-editor"></div>');
+        const name = $('<input class="text_pole" type="text" placeholder="组名">').val('组' + (settings.groups.length + 1));
+        box.append($('<label class="yhjm-editor-label"></label>').text('新组名'), name);
+        const popup = new Popup(box, POPUP_TYPE.CONFIRM, '', {
+            okButton: '创建',
+            cancelButton: '取消',
+        });
+        popup.show().then((res) => {
+            if (res !== POPUP_RESULT.AFFIRMATIVE) return;
+            const group = {
+                id: genId(),
+                name: String(name.val()).trim() || ('组' + (settings.groups.length + 1)),
+                enabled: true,
+                rules: [],
+            };
+            settings.groups.push(group);
+            selectedId = group.id;
+            settings.activeGroupId = group.id;
+            saveSettings();
+            renderAll();
+        });
+    }
+
+    addGroup.on('click', openNewGroupDialog);
+
 
     groupName.on('input', () => {
         const group = selectedGroup();
@@ -311,7 +381,7 @@ function openPanel() {
         renderList();
     });
 
-    const addRule = $('<button class="menu_button"></button>').append('<i class="fa-solid fa-plus"></i> ').append('添加规则');
+    const addRule = $('<button class="menu_button yhjm-icon-btn" title="添加规则"></button>').append('<i class="fa-solid fa-plus"></i>');
     addRule.on('click', () => {
         const group = selectedGroup();
         if (!group) return;
@@ -323,7 +393,7 @@ function openPanel() {
     const previewBtn = $('<button class="menu_button"></button>').text('预览');
     previewBtn.on('click', () => {
         const rules = getEnabledRules();
-        if (!rules.length) { result.text('没有启用的规则（看看左边哪些组没勾）。'); return; }
+        if (!rules.length) { result.text('没有启用的规则。'); return; }
         const { messages, hits } = countMatches(getContext().chat ?? [], rules);
         result.text(messages ? '当前聊天会改到 ' + messages + ' 条消息、共 ' + hits + ' 处。' : '当前聊天没有命中任何规则。');
     });
@@ -334,19 +404,71 @@ function openPanel() {
         result.text(changed ? '已永久替换 ' + changed + ' 条消息。' : '没有需要替换的内容。');
     });
 
-    actions.append(addRule, previewBtn, scanBtn);
-    left.append(search, list, addGroup);
-    right.append(groupName, rulesBox, actions, result);
+    const fileInput = $('<input type="file" accept=".json,application/json" style="display:none">');
+    fileInput.on('change', () => {
+        const file = fileInput[0]?.files?.[0];
+        if (file) importFromFile(file);
+        fileInput.val('');
+    });
+
+    const exportBtn = $('<button class="menu_button"></button>').text('导出');
+    exportBtn.on('click', exportRules);
+    const importBtn = $('<button class="menu_button"></button>').text('导入');
+    importBtn.on('click', () => fileInput.click());
+
+    async function importFromFile(file) {
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            const groups = Array.isArray(data?.groups) ? data.groups : [];
+            if (!groups.length) {
+                toastr.warning('文件里没有组');
+                return;
+            }
+            let addedGroups = 0;
+            let addedRules = 0;
+            for (const g of groups) {
+                const name = String(g?.name ?? '未命名');
+                const rules = normalizeRules(g?.rules);
+                let target = settings.groups.find((x) => x.name === name);
+                if (!target) {
+                    target = { id: genId(), name, enabled: g?.enabled !== false, rules: [] };
+                    settings.groups.push(target);
+                    addedGroups++;
+                }
+                const exists = new Set(target.rules.map((r) => r.find + '\u0000' + r.replace));
+                for (const r of rules) {
+                    const key = r.find + '\u0000' + r.replace;
+                    if (exists.has(key)) continue;
+                    target.rules.push({ find: r.find, replace: r.replace, enabled: r.enabled });
+                    exists.add(key);
+                    addedRules++;
+                }
+            }
+            saveSettings();
+            renderAll();
+            toastr.success('导入完成：新增 ' + addedGroups + ' 个组、' + addedRules + ' 条规则');
+        } catch (error) {
+            console.error('[移花接木] 导入失败', error);
+            toastr.error('导入失败：文件格式不对');
+        }
+    }
+
+    actions.append(previewBtn, scanBtn, exportBtn, importBtn);
+    const nameRow = $('<div class="yhjm-name-row"></div>');
+    nameRow.append(groupName, addRule);
+    const footer = $('<div class="yhjm-footer"></div>');
+    footer.append(result, actions);
+    left.append(searchRow, list);
+    right.append(nameRow, rulesBox, footer);
     layout.append(left, right);
     container.append(layout);
     renderAll();
 
     const popup = new Popup(container, POPUP_TYPE.TEXT, '', {
         okButton: '关闭',
-        wider: true,
         allowVerticalScrolling: true,
     });
-    if (popup.dlg) popup.dlg.classList.add('yhjm-dialog');
     void popup.show();
 }
 
