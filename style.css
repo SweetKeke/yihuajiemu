@@ -1,10 +1,178 @@
-.yihuajiemu-settings textarea#yhjm-rules {
+.yhjm-panel {
     width: 100%;
-    min-height: 120px;
-    font-family: var(--monoFontFamily, monospace);
-    resize: vertical;
+    min-width: 520px;
+    max-width: 820px;
+    box-sizing: border-box;
+    text-align: left;
+}
+.yhjm-layout {
+    display: flex;
+    gap: 12px;
+    width: 100%;
+    align-items: stretch;
+}
+.yhjm-left {
+    flex: 0 0 210px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+}
+.yhjm-search {
+    flex: 0 0 auto;
+    width: 100%;
+}
+.yhjm-group-list {
+    flex: 1 1 auto;
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+    border-radius: 6px;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.yhjm-add-group {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+.yhjm-right {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+.yhjm-group-name {
+    width: 100%;
+}
+.yhjm-group-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+.yhjm-group-item:hover {
+    background: color-mix(in srgb, currentColor 8%, transparent);
+}
+.yhjm-group-item.active {
+    background: color-mix(in srgb, currentColor 15%, transparent);
+    font-weight: 600;
+}
+.yhjm-group-item-name {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.yhjm-group-enable {
+    flex: 0 0 auto;
+    margin: 0;
+}
+.yhjm-group-del {
+    opacity: 0;
+    flex: 0 0 auto;
+    padding: 0 4px;
+    background: transparent;
+    border: none;
+}
+.yhjm-group-item:hover .yhjm-group-del {
+    opacity: 0.7;
+}
+.yhjm-rules {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    max-height: 300px;
+    overflow-y: auto;
+}
+.yhjm-rule {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+}
+.yhjm-rule .yhjm-find,
+.yhjm-rule .yhjm-replace {
+    flex: 1 1 0;
+    min-width: 0;
+}
+.yhjm-arrow {
+    opacity: 0.6;
+    flex: 0 0 auto;
+}
+.yhjm-enable-label {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
+    font-size: 12px;
+    flex: 0 0 auto;
+}
+.yhjm-icon-btn {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    line-height: 1;
+}
+.yhjm-icon-btn i {
+    pointer-events: none;
+}
+.yhjm-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    width: 100%;
+}
+.yhjm-actions > button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+.yhjm-result {
+    font-size: 12px;
+    opacity: 0.85;
+    min-height: 1em;
+}
+.yhjm-empty {
+    opacity: 0.6;
+    font-size: 12px;
+    margin: 0;
 }
 
-.yihuajiemu-settings .inline-drawer-content p {
-    margin-top: 8px;
+/* 手机适配 */
+@media (max-width: 700px) {
+    .yhjm-panel {
+        min-width: 0;
+        width: 100%;
+        max-width: none;
+    }
+    .yhjm-layout {
+        flex-direction: column;
+        gap: 10px;
+    }
+    .yhjm-left {
+        flex: 0 0 auto;
+        width: 100%;
+    }
+    .yhjm-group-list {
+        max-height: 140px;
+    }
+    .yhjm-rules {
+        max-height: none;
+    }
+    .yhjm-rule {
+        flex-wrap: wrap;
+        row-gap: 4px;
+    }
+    .yhjm-rule .yhjm-find,
+    .yhjm-rule .yhjm-replace {
+        flex: 1 1 120px;
+    }
+    .yhjm-arrow {
+        display: none;
+    }
 }
