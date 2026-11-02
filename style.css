@@ -1,0 +1,10 @@
+.yihuajiemu-settings textarea#yhjm-rules {
+    width: 100%;
+    min-height: 120px;
+    font-family: var(--monoFontFamily, monospace);
+    resize: vertical;
+}
+
+.yihuajiemu-settings .inline-drawer-content p {
+    margin-top: 8px;
+}
