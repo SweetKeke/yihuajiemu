@@ -40,9 +40,6 @@
     flex-direction: column;
     gap: 2px;
 }
-.yhjm-add-group {
-    white-space: nowrap;
-}
 .yhjm-right {
     flex: 1 1 auto;
     display: flex;
@@ -185,8 +182,22 @@
         display: none;
     }
 }
-.yhjm-search-row { display: flex; gap: 4px; align-items: center; width: 100%; }
-
-.yhjm-name-row { display: flex; gap: 6px; align-items: center; width: 100%; }
-
-.yhjm-footer { margin-top: auto; display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.yhjm-search-row {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    width: 100%;
+}
+.yhjm-name-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    width: 100%;
+}
+.yhjm-footer {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+}
