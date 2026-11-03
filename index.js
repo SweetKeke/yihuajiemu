@@ -16,21 +16,48 @@ const DEFAULT_GROUP_NAME = '默认';
 const GROUP_NAME_PREFIX = '组';
 const UNNAMED_GROUP = '未命名';
 
+const WILDCARD_STOP_CHARS = ',，。.!?！？；;\n';
+const WILDCARD_PATTERN =
+    '[^' +
+    WILDCARD_STOP_CHARS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\n/g, '\\n') +
+    ']{0,15}?';
+
+const MODE_OPTIONS = [
+    { id: 'simple', label: '组合写法' },
+    { id: 'text', label: '字面写法' },
+];
+
 /* ---------------- 数据层 ---------------- */
 
 let idSeq = 0;
 const genId = () => 'g' + Date.now().toString(36) + (idSeq++).toString(36);
 let normalized = false;
 
-function normalizeRules(rules) {
-    if (!Array.isArray(rules)) return [];
-    return rules
-        .map((r) => ({
-            find: String(r?.find ?? ''),
-            replace: String(r?.replace ?? ''),
-            enabled: r?.enabled !== false,
-        }))
-        .filter((r) => r.find);
+/**
+ * 统一规则结构：
+ *   remark        备注
+ *   targets       查找内容（每行一条）
+ *   replacements  替换内容（每行一条，随机；空 = 删除）
+ *   mode          simple | text
+ */
+function normalizeRule(raw) {
+    const targets = Array.isArray(raw?.targets)
+        ? raw.targets.map((s) => String(s)).map((s) => s.trim()).filter(Boolean)
+        : raw?.find
+            ? [String(raw.find)]
+            : [];
+    const replacements = Array.isArray(raw?.replacements)
+        ? raw.replacements.map((s) => String(s))
+        : raw?.replace
+            ? [String(raw.replace)]
+            : [];
+    return {
+        remark: String(raw?.remark ?? ''),
+        targets,
+        replacements,
+        enabled: raw?.enabled !== false,
+        mode: raw?.mode === 'text' ? 'text' : 'simple',
+    };
 }
 
 function getSettings() {
@@ -42,10 +69,22 @@ function getSettings() {
             id: g.id ?? genId(),
             name: String(g.name ?? UNNAMED_GROUP),
             enabled: g.enabled !== false,
-            rules: normalizeRules(g.rules),
+            rules: (Array.isArray(g.rules) ? g.rules : []).map(normalizeRule).filter((r) => r.targets.length),
         }));
         if (!s.groups.length) {
-            s.groups.push({ id: genId(), name: DEFAULT_GROUP_NAME, enabled: true, rules: [] });
+            s.groups.push({
+                id: genId(),
+                name: DEFAULT_GROUP_NAME,
+                enabled: true,
+                rules: [
+                    normalizeRule({
+                        remark: '示例规则（默认停用）',
+                        targets: ['{突然,猛地}{一顿,一颤}?'],
+                        replacements: [],
+                        enabled: false,
+                    }),
+                ],
+            });
         }
         if (!s.activeGroupId || !s.groups.some((g) => g.id === s.activeGroupId)) {
             s.activeGroupId = s.groups[0].id;
@@ -64,7 +103,7 @@ function getEnabledRules() {
     for (const group of getSettings().groups) {
         if (!group.enabled) continue;
         for (const rule of group.rules) {
-            if (rule.enabled && rule.find) out.push(rule);
+            if (rule.enabled && rule.targets.length) out.push(rule);
         }
     }
     return out;
@@ -72,6 +111,153 @@ function getEnabledRules() {
 
 function saveSettings() {
     saveSettingsDebounced();
+}
+
+/* ---------------- 简易语法 ---------------- */
+
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 顶层按 | 或 , 切分（不切花括号内部） */
+function splitTopLevel(text) {
+    const parts = [];
+    let depth = 0;
+    let buffer = '';
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '\\' && i + 1 < text.length) {
+            buffer += ch + text[i + 1];
+            i++;
+            continue;
+        }
+        if (ch === '{') depth++;
+        else if (ch === '}') depth = Math.max(0, depth - 1);
+        if ((ch === '|' || ch === ',') && depth === 0) {
+            parts.push(buffer);
+            buffer = '';
+        } else {
+            buffer += ch;
+        }
+    }
+    parts.push(buffer);
+    return parts;
+}
+
+/** 字面模式：按逗号拆多条，支持 \, 转义，并还原转义字符 */
+function splitLiteralList(text) {
+    const out = [];
+    let buffer = '';
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (ch === '\\' && i + 1 < text.length) {
+            buffer += text[i + 1];
+            i++;
+            continue;
+        }
+        if (ch === ',' || ch === '，') {
+            out.push(buffer);
+            buffer = '';
+        } else {
+            buffer += ch;
+        }
+    }
+    out.push(buffer);
+    return out.map((s) => s.trim()).filter(Boolean);
+}
+
+/** 编译单条分支：{a,b} → (?:a|b)，}? → 可选，其余转义 */
+function compileBranch(branch) {
+    let out = '';
+    let pending = '';
+    const flush = () => {
+        if (pending) {
+            out += escapeRegExp(pending);
+            pending = '';
+        }
+    };
+    let i = 0;
+    while (i < branch.length) {
+        const ch = branch[i];
+        if (ch === '\\' && i + 1 < branch.length) {
+            flush();
+            out += escapeRegExp(branch[i + 1]);
+            i += 2;
+            continue;
+        }
+        if (ch === '*') {
+            flush();
+            out += WILDCARD_PATTERN;
+            i++;
+            continue;
+        }
+        if (ch === '{') {
+            flush();
+            const close = branch.indexOf('}', i);
+            if (close === -1) {
+                pending += branch.slice(i);
+                break;
+            }
+            const options = branch
+                .slice(i + 1, close)
+                .split(',')
+                .map((s) => s.trim())
+                .filter(Boolean)
+                .map(escapeRegExp);
+            if (options.length) {
+                out += '(?:' + options.join('|') + ')';
+                if (branch[close + 1] === '?') {
+                    out += '?';
+                    i = close + 2;
+                    continue;
+                }
+            }
+            i = close + 1;
+            continue;
+        }
+        if (ch === '?') {
+            if (pending) {
+                const last = pending.slice(-1);
+                pending = pending.slice(0, -1);
+                flush();
+                out += escapeRegExp(last) + '?';
+            } else {
+                pending += ch;
+            }
+            i++;
+            continue;
+        }
+        pending += ch;
+        i++;
+    }
+    flush();
+    return out;
+}
+
+function compileFind(find, mode = 'simple') {
+    if (mode === 'text') return { find, re: null };
+    if (!find.includes('{') && !find.includes('|') && !find.includes('?') && !find.includes(',') && !find.includes('*')) {
+        return { find, re: null };
+    }
+    const branches = splitTopLevel(find)
+        .map((branch) => branch.trim())
+        .map(compileBranch)
+        .filter(Boolean);
+    if (!branches.length) return { find, re: null };
+    return { find, re: new RegExp(branches.join('|'), 'g') };
+}
+
+const matcherCache = new Map();
+
+function getMatcher(find, mode) {
+    const key = String(mode ?? 'simple') + '\u0000' + find;
+    const cached = matcherCache.get(key);
+    if (cached) return cached;
+    // 规则改多了会不断新增缓存，超过上限就整体清一次
+    if (matcherCache.size > 500) matcherCache.clear();
+    const matcher = compileFind(find, mode);
+    matcherCache.set(key, matcher);
+    return matcher;
 }
 
 /* ---------------- 文本处理 ---------------- */
@@ -87,11 +273,38 @@ function countOccurrences(text, find) {
     return count;
 }
 
+function pickReplacement(list) {
+    if (!Array.isArray(list) || !list.length) return '';
+    return list[Math.floor(Math.random() * list.length)];
+}
+
+function replacePlain(text, find, replacements) {
+    let out = '';
+    let index = 0;
+    while (true) {
+        const pos = text.indexOf(find, index);
+        if (pos === -1) {
+            out += text.slice(index);
+            break;
+        }
+        out += text.slice(index, pos) + pickReplacement(replacements);
+        index = pos + find.length;
+    }
+    return out;
+}
+
 function applyRulesToText(text, rules) {
     if (typeof text !== 'string' || !text) return text;
     let out = text;
     for (const rule of rules) {
-        if (out.includes(rule.find)) out = out.split(rule.find).join(rule.replace);
+        for (const target of rule.targets) {
+            const matcher = getMatcher(target, rule.mode);
+            if (matcher.re) {
+                out = out.replace(matcher.re, () => pickReplacement(rule.replacements));
+            } else if (out.includes(target)) {
+                out = replacePlain(out, target, rule.replacements);
+            }
+        }
     }
     return out;
 }
@@ -118,6 +331,15 @@ function applyToMessage(msg, rules) {
     return changed;
 }
 
+function countInText(text, target, mode) {
+    const matcher = getMatcher(target, mode);
+    if (matcher.re) {
+        const found = text.match(matcher.re);
+        return found ? found.length : 0;
+    }
+    return countOccurrences(text, target);
+}
+
 function countMatches(chatArr, rules) {
     let messages = 0;
     let hits = 0;
@@ -127,10 +349,12 @@ function countMatches(chatArr, rules) {
         for (const text of texts) {
             if (typeof text !== 'string') continue;
             for (const rule of rules) {
-                const found = countOccurrences(text, rule.find);
-                if (found > 0) {
-                    changed = true;
-                    hits += found;
+                for (const target of rule.targets) {
+                    const found = countInText(text, target, rule.mode);
+                    if (found > 0) {
+                        changed = true;
+                        hits += found;
+                    }
                 }
             }
         }
@@ -152,7 +376,6 @@ function handleSingleMessage(messageId) {
         const msg = getContext().chat?.[id];
         if (!msg) return;
         if (!applyToMessage(msg, rules)) return;
-        // 交给酒馆的防抖保存，避免每条消息都同步写盘
         saveChatDebounced();
     } catch (error) {
         console.error('[移花接木] 处理消息失败', error);
@@ -197,12 +420,18 @@ function exportRules() {
         const settings = getSettings();
         const data = {
             app: 'yihuajiemu',
-            version: 1,
+            version: 2,
             exportedAt: new Date().toISOString(),
             groups: settings.groups.map((g) => ({
                 name: g.name,
                 enabled: g.enabled,
-                rules: g.rules.map((r) => ({ find: r.find, replace: r.replace, enabled: r.enabled })),
+                rules: g.rules.map((r) => ({
+                    remark: r.remark,
+                    targets: r.targets,
+                    replacements: r.replacements,
+                    enabled: r.enabled,
+                    mode: r.mode,
+                })),
             })),
         };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -224,7 +453,20 @@ function exportRules() {
 async function importFromFile(file) {
     try {
         const data = JSON.parse(await file.text());
-        const groups = Array.isArray(data?.groups) ? data.groups : [];
+        let groups = Array.isArray(data?.groups) ? data.groups : [];
+        if (!groups.length && Array.isArray(data?.rules)) {
+            groups = data.rules.map((item) => ({
+                name: String(item?.name ?? UNNAMED_GROUP),
+                enabled: item?.enabled !== false,
+                rules: (Array.isArray(item?.subRules) ? item.subRules : []).map((sub) => ({
+                    remark: String(sub?.remark ?? ''),
+                    targets: Array.isArray(sub?.targets) ? sub.targets : [],
+                    replacements: Array.isArray(sub?.replacements) ? sub.replacements : [],
+                    enabled: sub?.enabled !== false,
+                    mode: sub?.mode === 'text' ? 'text' : 'simple',
+                })),
+            }));
+        }
         if (!groups.length) return { ok: false, message: '文件里没有组' };
 
         const settings = getSettings();
@@ -232,18 +474,19 @@ async function importFromFile(file) {
         let addedRules = 0;
         for (const g of groups) {
             const name = String(g?.name ?? UNNAMED_GROUP);
-            const rules = normalizeRules(g?.rules);
             let target = settings.groups.find((x) => x.name === name);
             if (!target) {
                 target = { id: genId(), name, enabled: g?.enabled !== false, rules: [] };
                 settings.groups.push(target);
                 addedGroups++;
             }
-            const exists = new Set(target.rules.map((r) => r.find + '\u0000' + r.replace));
-            for (const r of rules) {
-                const key = r.find + '\u0000' + r.replace;
+            const exists = new Set(target.rules.map((r) => r.targets.join('\u0000') + '\u0001' + r.replacements.join('\u0000')));
+            for (const rawRule of Array.isArray(g?.rules) ? g.rules : []) {
+                const rule = normalizeRule(rawRule);
+                if (!rule.targets.length) continue;
+                const key = rule.targets.join('\u0000') + '\u0001' + rule.replacements.join('\u0000');
                 if (exists.has(key)) continue;
-                target.rules.push({ find: r.find, replace: r.replace, enabled: r.enabled });
+                target.rules.push(rule);
                 exists.add(key);
                 addedRules++;
             }
@@ -256,13 +499,17 @@ async function importFromFile(file) {
     }
 }
 
-/* ---------------- 弹窗：新建组 ---------------- */
+/* ---------------- 弹窗 ---------------- */
+
+function editorLabel(text) {
+    return $('<div class="yhjm-editor-label"></div>').text(text);
+}
 
 function openNewGroupDialog() {
     return new Promise((resolve) => {
         const box = $('<div class="yhjm-rule-editor"></div>');
         const name = $('<input class="text_pole" type="text" placeholder="组名">').val(nextGroupName());
-        box.append($('<label class="yhjm-editor-label"></label>').text('新组名'), name);
+        box.append(editorLabel('新组名'), name);
         const popup = new Popup(box, POPUP_TYPE.CONFIRM, '', {
             okButton: '创建',
             cancelButton: '取消',
@@ -277,7 +524,81 @@ function openNewGroupDialog() {
     });
 }
 
-/* ---------------- DOM 构建 ---------------- */
+function openRuleEditor(rule) {
+    return new Promise((resolve) => {
+        const box = $('<div class="yhjm-rule-editor"></div>');
+
+        const modeSelect = $('<select class="text_pole"></select>');
+        for (const item of MODE_OPTIONS) {
+            modeSelect.append($('<option></option>').val(item.id).text(item.label));
+        }
+        modeSelect.val(rule?.mode ?? 'simple');
+
+        const remark = $('<input class="text_pole" type="text" placeholder="随便记一笔，比如：清理口头禅">')
+            .val(rule?.remark ?? '');
+        const targets = $('<textarea class="text_pole yhjm-textarea" rows="4"></textarea>')
+            .val((rule?.targets ?? []).join('\n'));
+        const replacements = $('<textarea class="text_pole yhjm-textarea" rows="4"></textarea>')
+            .attr('placeholder', '一行一条，也可用逗号分隔；命中后随机挑一条换上去，不填就直接删掉')
+            .val((rule?.replacements ?? []).join('\n'));
+
+        const syncPlaceholder = () => {
+            targets.attr(
+                'placeholder',
+                modeSelect.val() === 'text'
+                    ? '一行一条，也可用逗号分隔\n比如：他叹了口气,她笑了笑'
+                    : '一行一条，可用 {甲,乙} 任选、| 表示或、? 表示可省略\n比如：{突然,猛地}{一顿,一颤}?',
+            );
+        };
+        modeSelect.on('change', syncPlaceholder);
+        syncPlaceholder();
+
+        box.append(
+            editorLabel('备注（可选）'), remark,
+            editorLabel('匹配方式'), modeSelect,
+            editorLabel('查找'), targets,
+            editorLabel('替换'), replacements,
+        );
+
+        const popup = new Popup(box, POPUP_TYPE.CONFIRM, '', {
+            okButton: '保存',
+            cancelButton: '取消',
+        });
+        popup.show().then((result) => {
+            if (result !== POPUP_RESULT.AFFIRMATIVE) {
+                resolve(null);
+                return;
+            }
+            const isTextMode = String(modeSelect.val()) === 'text';
+            const targetList = String(targets.val())
+                .split('\n')
+                .flatMap((line) => {
+                    const text = line.trim();
+                    if (!text) return [];
+                    if (!isTextMode) return [text];
+                    return splitLiteralList(text);
+                })
+                .filter(Boolean);
+            if (!targetList.length) {
+                toastr.warning('查找不能为空');
+                resolve(null);
+                return;
+            }
+            const replacementList = String(replacements.val())
+                .split('\n')
+                .flatMap((line) => splitLiteralList(line));
+            resolve({
+                remark: String(remark.val()),
+                targets: targetList,
+                replacements: replacementList,
+                enabled: rule?.enabled !== false,
+                mode: String(modeSelect.val()),
+            });
+        });
+    });
+}
+
+/* ---------------- DOM ---------------- */
 
 function makeIconButton(title, iconClass) {
     return $('<button class="menu_button yhjm-icon-btn"></button>')
@@ -304,7 +625,7 @@ function buildPanelDom() {
 
     const nameRow = $('<div class="yhjm-name-row"></div>');
     const groupName = $('<input class="text_pole yhjm-group-name" type="text" placeholder="组名">');
-    const addRule = makeIconButton('添加规则', 'fa-plus');
+    const addRule = makeIconButton('新建规则', 'fa-plus');
     nameRow.append(groupName, addRule);
 
     const rulesBox = $('<div class="yhjm-rules"></div>');
@@ -344,38 +665,6 @@ function createPanelController() {
     const selectedGroup = () =>
         settings.groups.find((g) => g.id === selectedId) ?? settings.groups[0] ?? null;
 
-    function renderRuleRow(rule) {
-        const row = $('<div class="yhjm-rule"></div>');
-        const find = $('<input class="text_pole yhjm-find" type="text" placeholder="查找">').val(rule.find);
-        const arrow = $('<span class="yhjm-arrow">→</span>');
-        const replace = $('<input class="text_pole yhjm-replace" type="text" placeholder="替换（留空 = 删除）">').val(rule.replace);
-        const enabled = $('<input type="checkbox" class="yhjm-enabled" title="启用">').prop('checked', rule.enabled);
-        const del = makeIconButton('删除这条规则', 'fa-trash');
-
-        find.on('input', () => {
-            rule.find = String(find.val()).trim();
-            saveSettings();
-        });
-        replace.on('input', () => {
-            rule.replace = String(replace.val());
-            saveSettings();
-        });
-        enabled.on('change', () => {
-            rule.enabled = enabled.prop('checked');
-            saveSettings();
-        });
-        del.on('click', () => {
-            const group = selectedGroup();
-            if (!group) return;
-            group.rules = group.rules.filter((r) => r !== rule);
-            saveSettings();
-            renderRules();
-        });
-
-        row.append(find, arrow, replace, enabled, del);
-        return row;
-    }
-
     function renderRules() {
         const group = selectedGroup();
         dom.rulesBox.empty();
@@ -384,8 +673,44 @@ function createPanelController() {
             dom.rulesBox.append(renderRuleRow(rule));
         }
         if (!group.rules.length) {
-            dom.rulesBox.append($('<p class="yhjm-empty"></p>').text('这个组还没有规则。'));
+            dom.rulesBox.append($('<p class="yhjm-empty"></p>').text('这个组还没有规则，点右上角的 ＋ 新建。'));
         }
+    }
+
+    function renderRuleRow(rule) {
+        const row = $('<div class="yhjm-rule"></div>');
+
+        const enable = $('<input type="checkbox" class="yhjm-enabled" title="启用这条规则">')
+            .prop('checked', rule.enabled);
+        enable.on('change', () => {
+            rule.enabled = enable.prop('checked');
+            saveSettings();
+        });
+
+        const name = $('<span class="yhjm-rule-name"></span>')
+            .text(rule.remark || rule.targets[0] || '(未命名)');
+        if (rule.targets.length > 1) {
+            name.append($('<span class="yhjm-rule-count"></span>').text(' +' + (rule.targets.length - 1)));
+        }
+
+        const target = $('<span class="yhjm-rule-target"></span>')
+            .text(rule.replacements.length ? rule.replacements.join(' / ') : '删除');
+
+        const text = $('<div class="yhjm-rule-text"></div>');
+        text.append(name, $('<span class="yhjm-arrow">→</span>'), target);
+        text.on('click', () => { void editRule(rule); });
+
+        const del = makeIconButton('删除这条规则', 'fa-trash');
+        del.on('click', () => {
+            const group = selectedGroup();
+            if (!group) return;
+            group.rules = group.rules.filter((r) => r !== rule);
+            saveSettings();
+            renderRules();
+        });
+
+        row.append(enable, text, del);
+        return row;
     }
 
     function renderGroupList() {
@@ -449,7 +774,9 @@ function createPanelController() {
         const input = $('<input class="text_pole yhjm-rename" type="text">').val(group.name);
         nameNode.replaceWith(input);
         input.trigger('focus').select?.();
+        let cancelled = false;
         const commit = () => {
+            if (cancelled) return;
             group.name = String(input.val()).trim() || UNNAMED_GROUP;
             saveSettings();
             renderAll();
@@ -457,7 +784,10 @@ function createPanelController() {
         input.on('blur', commit);
         input.on('keydown', (ev) => {
             if (ev.key === 'Enter') input.trigger('blur');
-            if (ev.key === 'Escape') renderAll();
+            if (ev.key === 'Escape') {
+                cancelled = true;
+                renderAll();
+            }
         });
     }
 
@@ -483,10 +813,23 @@ function createPanelController() {
         selectGroup(group.id);
     }
 
-    function addRule() {
+    async function createRule() {
         const group = selectedGroup();
         if (!group) return;
-        group.rules.push({ find: '', replace: '', enabled: true });
+        const rule = await openRuleEditor(null);
+        if (!rule) return;
+        group.rules.push(rule);
+        saveSettings();
+        renderRules();
+    }
+
+    async function editRule(rule) {
+        const edited = await openRuleEditor(rule);
+        if (!edited) return;
+        rule.remark = edited.remark;
+        rule.targets = edited.targets;
+        rule.replacements = edited.replacements;
+        rule.mode = edited.mode;
         saveSettings();
         renderRules();
     }
@@ -526,7 +869,7 @@ function createPanelController() {
             renderGroupList();
         });
         dom.addGroup.on('click', () => { void createGroup(); });
-        dom.addRule.on('click', addRule);
+        dom.addRule.on('click', () => { void createRule(); });
         dom.groupName.on('input', () => {
             const group = selectedGroup();
             if (!group) return;
@@ -579,6 +922,10 @@ jQuery(async () => {
     };
     tryAdd();
 
+    // AI 回复
     eventSource.on(event_types.MESSAGE_RECEIVED, (messageId) => { handleSingleMessage(messageId); });
+    // 切换刷新
     eventSource.on(event_types.MESSAGE_SWIPED, (messageId) => { handleSingleMessage(messageId); });
+    // 用户发送的消息（在 prompt 组装前改掉，AI 看不到原词）
+    eventSource.on(event_types.MESSAGE_SENT, (messageId) => { handleSingleMessage(messageId); });
 });

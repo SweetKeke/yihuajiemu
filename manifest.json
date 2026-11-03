@@ -6,7 +6,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "SweetKeke",
-    "version": "1.1.2",
+    "version": "1.2.0",
     "homePage": "https://github.com/SweetKeke/yihuajiemu",
     "description": "移花接木：通用关键词永久替换。支持多条规则，新消息自动永久改写并保存，可一键扫描修复已有消息。关掉扩展也不会变回去。"
 }
