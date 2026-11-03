@@ -2,6 +2,7 @@ import { extension_settings, getContext } from '../../../extensions.js';
 import {
     saveSettingsDebounced,
     saveChat,
+    saveChatDebounced,
     printMessages,
     eventSource,
     event_types,
@@ -142,12 +143,8 @@ function countMatches(chatArr, rules) {
 
 let busy = false;
 
-async function handleSingleMessage(messageId) {
+function handleSingleMessage(messageId) {
     try {
-        if (busy) {
-            setTimeout(() => { void handleSingleMessage(messageId); }, 500);
-            return;
-        }
         const id = Number(messageId);
         if (!Number.isInteger(id) || id < 0) return;
         const rules = getEnabledRules();
@@ -155,12 +152,8 @@ async function handleSingleMessage(messageId) {
         const msg = getContext().chat?.[id];
         if (!msg) return;
         if (!applyToMessage(msg, rules)) return;
-        busy = true;
-        try {
-            await saveChat();
-        } finally {
-            busy = false;
-        }
+        // 交给酒馆的防抖保存，避免每条消息都同步写盘
+        saveChatDebounced();
     } catch (error) {
         console.error('[移花接木] 处理消息失败', error);
     }
@@ -586,6 +579,6 @@ jQuery(async () => {
     };
     tryAdd();
 
-    eventSource.on(event_types.MESSAGE_RECEIVED, (messageId) => { void handleSingleMessage(messageId); });
-    eventSource.on(event_types.MESSAGE_SWIPED, (messageId) => { void handleSingleMessage(messageId); });
+    eventSource.on(event_types.MESSAGE_RECEIVED, (messageId) => { handleSingleMessage(messageId); });
+    eventSource.on(event_types.MESSAGE_SWIPED, (messageId) => { handleSingleMessage(messageId); });
 });
